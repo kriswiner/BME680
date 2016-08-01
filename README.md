@@ -4,4 +4,4 @@ Simple Teensy 3.X sketch that configures and initializes the sensors, reads the 
 
 ![BME680](https://cloud.githubusercontent.com/assets/6698410/17267381/0170571a-55bc-11e6-982f-62df273703f8.jpg)
 
-This breakout for the BME680 is [available]() on Tindie.
+This breakout for the BME680 is [available](https://www.tindie.com/products/onehorse/bme680-environmental-sensor/) on Tindie.
