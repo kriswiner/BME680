@@ -137,7 +137,7 @@ enum Mode {
 };
 
 enum SBy {
-  t_00_5ms = 0,
+  t_00_6ms = 0,
   t_62_5ms,
   t_125ms,
   t_250ms,
@@ -147,25 +147,44 @@ enum SBy {
   t_20ms,
 };
 
+enum GWaitMult {
+  gw_1xmult = 0,
+  gw_4xmult,
+  gw_16xmult,
+  gw_64xmult
+};
+
 // Specify BME680 configuration
-uint8_t Posr = P_OSR_16, Hosr = H_OSR_16, Tosr = T_OSR_02, Mode = Sequential, IIRFilter = BW0_042ODR, SBy = t_62_5ms;     // set pressure amd temperature output data rate
+uint8_t Posr = P_OSR_16, Hosr = H_OSR_01, Tosr = T_OSR_02, Mode = Forced, IIRFilter = BW0_042ODR, SBy = t_10ms;     // set pressure amd temperature output data rate
+// Gas sensor configuration
+uint8_t GWaitMult = gw_1xmult; // choose gas sensor wait time multiplier
+uint8_t numHeatPts = 0x01; // one heat set point
+// choose gas wait time in milliseconds x gas wait multiplier 0x00 | 0x59 == 100 ms gas wait time
+uint8_t gasWait[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // must choose at least one non-zero wait time  
+uint8_t resHeat[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // must choose at least one non-zero wait time  
+
+// Data arrays for conversion of raw gas measurements into resistance
+float const_array1[16] = {1, 1, 1, 1, 1, 0.99, 1, 0.992, 1, 1, 0.998, 0.995, 1, 0.99, 1, 1};
+double const_array2[16] = {8000000.0, 4000000.0, 2000000.0, 1000000.0, 499500.4995, 248262.1648, 125000.0, 
+63004.03226, 31281.28128, 15625.0, 7812.5, 3906.25, 1953.125, 976.5625, 488.28125, 244.140625};
+
 // t_fine carries fine temperature as global value for BME680
 int32_t t_fine;
 
 float Temperature, Pressure, Humidity; // stores BME680 pressures sensor pressure and temperature
 uint32_t rawPress, rawTemp;   // pressure and temperature raw count output for BME680
-uint16_t rawHumidity;  // variables to hold raw BME680 humidity value
+uint16_t rawHumidity, rawGasResistance;  // variables to hold raw BME680 humidity and gas resistance values
 
 // BME680 compensation parameters
 uint8_t  dig_P10, dig_H6;
 uint16_t dig_T1, dig_P1, dig_H1, dig_H2;
 int16_t  dig_T2, dig_P2, dig_P4, dig_P5, dig_P8, dig_P9, dig_GH2;
 int8_t   dig_T3, dig_P3, dig_P6, dig_P7, dig_H3, dig_H4, dig_H5, dig_H7, dig_GH1, dig_GH3;
-float   temperature_C, temperature_F, pressure, humidity, altitude; // Scaled output of the BME680
+float   temperature_C, temperature_F, pressure, humidity, altitude, resistance; // Scaled output of the BME680
 
 uint32_t delt_t = 0, count = 0, sumCount = 0, slpcnt = 0;  // used to control display output rate
 
-
+uint8_t status0, status1, status2;
 
 void setup()
 {
@@ -194,7 +213,7 @@ void setup()
   writeByte(BME680_ADDRESS, BME680_RESET, 0xB6); // reset BME680 before initialization
   delay(100);
 
-  BME680Init(); // Initialize BME680 altimeter
+  BME680TPHInit(); // Initialize BME680 Temperature, Pressure, Humidity sensors
   Serial.println("Calibration coeficients:");
   Serial.print("dig_T1 ="); 
   Serial.println(dig_T1);
@@ -242,7 +261,13 @@ void setup()
   Serial.println(dig_GH2);
   Serial.print("dig_GH3 ="); 
   Serial.println(dig_GH3);
-  
+
+  // Configure the gas sensor
+  gasWait[0] = GWaitMult | 0x59;  // define gas wait time for heat set point 0x59 == 100 ms
+  Serial.print("gas wait time = 0x"); Serial.println(gasWait[0], HEX);
+  resHeat[0] = BME680_TT(200);    // define temperature set point in degrees Celsius for resistance set point 0
+  Serial.print("resistance Heat = "); Serial.println(resHeat[0]);
+  BME680GasInit();
 
  }
   else Serial.println(" BME680 not functioning!");
@@ -255,13 +280,24 @@ void loop()
 {  
    // Serial print and/or display at 0.5 s rate independent of data rates
     delt_t = millis() - count;
-    if (delt_t > 1000) { // update LCD once per half-second independent of read rate
+    if (delt_t > 1000) { // update LCD once per second independent of read rate
+
+    // Check status registers
+     status0 = readByte(BME680_ADDRESS, BME680_FIELD_0_MEAS_STATUS_0);
+      if(status0 & 0x80) Serial.println("New data in field 0!");
+      if(status0 & 0x40) Serial.println("Measuring field 0 gas data!");
+      if(status0 & 0x20) Serial.println("Conversion in progress!");
+      Serial.print("Gas measurement Index = "); Serial.println(status0 & 0x0F);
+      
+    writeByte(BME680_ADDRESS, BME680_CTRL_MEAS, Tosr << 5 | Posr << 2 | Mode);
     rawTemp =   readBME680Temperature();
     temperature_C = (float) BME680_compensate_T(rawTemp)/100.;
     rawPress =  readBME680Pressure();
     pressure = (float) BME680_compensate_P(rawPress)/100.; // Pressure in mbar
     rawHumidity =   readBME680Humidity();
     humidity = (float) BME680_compensate_H(rawHumidity)/1024.;
+    rawGasResistance = readBME680GasResistance();
+    resistance = (float) BME680_compensate_Gas(rawGasResistance);
  
       Serial.println("BME680:");
       Serial.print("Altimeter temperature = "); 
@@ -279,7 +315,13 @@ void loop()
       Serial.println(" feet");
       Serial.print("Altimeter humidity = "); 
       Serial.print(humidity, 1);  
-      Serial.println(" %RH");// pressure in millibar
+      Serial.println(" %rH");// relative humidity
+      Serial.print("Gas Sensor raw resistance = "); 
+      Serial.print(rawGasResistance);  
+      Serial.println(" ");
+      Serial.print("Gas Sensor resistance = "); 
+      Serial.print(resistance, 1);  
+      Serial.println(" Ohm");// gas sensor resistance in Ohm
       Serial.println(" ");
 
       digitalWrite(myLed, !digitalRead(myLed));
@@ -313,10 +355,19 @@ uint16_t readBME680Humidity()
   return (uint16_t) (((uint16_t) rawData[0] << 8 | rawData[1]) );
 }
 
-
-void BME680Init()
+uint16_t readBME680GasResistance()
 {
-  // Configure the BME680
+  uint8_t rawData[2];  // 10-bit gas resistance register data stored here
+  readBytes(BME680_ADDRESS, BME680_FIELD_0_GAS_RL_MSB, 2, &rawData[0]);  
+  if(rawData[1] & 0x20) Serial.println("Field 0 gas data valid"); 
+  return (uint16_t) (((uint16_t) rawData[0] << 2 | (0xC0 & rawData[1]) >> 6) );
+
+}
+
+
+void BME680TPHInit()
+{
+  // Configure the BME680 Temperature, Pressure, Humidity sensors
   // Set H oversampling rate
   writeByte(BME680_ADDRESS, BME680_CTRL_HUM, 0x07 & Hosr);
   // Set T and P oversampling rates and sensor mode
@@ -355,6 +406,53 @@ void BME680Init()
   dig_GH1 =  (int8_t) calib[37];
   dig_GH2 = ( int16_t)((( int16_t) calib[36] << 8) | calib[35]);
   dig_GH3 =  (int8_t) calib[38];
+}
+
+void BME680GasInit()  // Initialize BME680 gas sensor
+{
+  // Configure the BME680 Gas Sensor
+  writeByte(BME680_ADDRESS, BME680_CTRL_GAS_1, 0x10 | numHeatPts - 1); // write number of heater set points
+  // Set gas sampling wait time and target heater resistance
+  for(uint8_t ii = 0; ii < numHeatPts; ii++) 
+  {
+    writeByte(BME680_ADDRESS, (BME680_GAS_WAIT_X + ii), gasWait[ii]);
+    writeByte(BME680_ADDRESS, (BME680_RES_HEAT_X + ii), resHeat[ii]);
+  }
+  Serial.print("CTRL_GAS_1 = 0x"); Serial.println(readByte(BME680_ADDRESS, BME680_CTRL_GAS_1), HEX);
+  Serial.print("gas wait = 0x"); Serial.println(readByte(BME680_ADDRESS, BME680_GAS_WAIT_X), HEX);
+  Serial.print("res heat = 0x"); Serial.println(readByte(BME680_ADDRESS, BME680_RES_HEAT_X));
+}
+
+// Returns register code to be written to register BME680_RES_HEAT_CTRL for a user specified target temperature TT
+// where TT is the target temperature in degrees Celsius
+uint8_t BME680_TT(uint16_t TT) // TT is between 200 and 400  
+{
+  uint8_t res_heat_x = 0;
+  double var1 = 0.0, var2 = 0.0, var3 = 0.0, var4 = 0.0, var5 = 0.0;
+  uint16_t par_g1 = ((uint16_t) readByte(BME680_ADDRESS, 0xEC) << 8) | readByte(BME680_ADDRESS, 0xEB);
+  uint8_t  par_g2 = readByte(BME680_ADDRESS, 0xED);
+  uint8_t  par_g3 = readByte(BME680_ADDRESS, 0xEE);
+  uint8_t  res_heat_range = (readByte(BME680_ADDRESS, 0x02) & 0x30) >> 4;
+  uint8_t res_heat_val = readByte(BME680_ADDRESS, 0x00);
+  var1 = ((double) par_g1/ 16.0) + 49.0;
+  var2 = (((double)par_g2 / 32768.0) * 0.0005) + 0.00235;
+  var3 = (double)par_g3 / 1024.0;
+  var4 = var1 * (1.0 + (var2 * (double)TT));
+  var5 = var4 + (var3 * 25.0); // use 25 C as ambient temperature
+  res_heat_x = (uint8_t)(((var5 * (4.0/(4.0 * (double)res_heat_range))) - 25.0) * 3.4 / ((res_heat_val * 0.002) + 1));
+  return res_heat_x;
+  }
+
+  
+  // Compensate Raw Gas ADC values to obtain resistance
+float BME680_compensate_Gas(uint16_t gas_adc)
+{
+  uint8_t gasRange = readByte(BME680_ADDRESS, BME680_FIELD_0_GAS_RL_LSB) & 0x0F;
+  Serial.print("gas range = "); Serial.println(gasRange);
+  double var1 = 0, gas_switch_error = 1.0;
+  var1 =  (1340.0 + 5.0 * gas_switch_error) * const_array1[gasRange];
+  float gas_res = var1 * const_array2[gasRange] / (gas_adc - 512.0 + var1);
+  return gas_res;
 }
 
 // Returns temperature in DegC, resolution is 0.01 DegC. Output value of
